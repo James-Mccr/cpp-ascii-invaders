@@ -2,7 +2,10 @@
 #include "lib/frame.h"
 #include "lib/input.h"
 #include "lib/render.h"
+#include <chrono>
+#include <cstdlib>
 #include <string>
+#include <random>
 #include <vector>
 
 using namespace std;
@@ -77,6 +80,8 @@ private:
     bool active{};
 };
 
+enum class InvaderState { Alive, Dead, Inactive };
+
 class Invader
 {
 public:
@@ -84,15 +89,15 @@ public:
     {
         x = _x;
         y = _y;
-        alive = true;
+        state = InvaderState::Alive;
     }
 
     void Collide(Grid& grid)
     {
-        if (!alive) return;
+        if (state != InvaderState::Alive) return;
         if (grid.IsCollision(x, y, Bullet::ascii))
         {
-            alive = false;
+            state = InvaderState::Dead;
             grid.SetTile(x, y); 
             return;
         }
@@ -100,7 +105,10 @@ public:
 
     void Update(const int speed, Grid& grid)
     {
-        if (!alive) return;
+        if (state == InvaderState::Alive && rand() <= BULLET_THRESHOLD)
+            bullet.Fire(x, y, 1);
+        bullet.Update(grid);
+        if (state != InvaderState::Alive) return;
         grid.SetTile(x, y); 
         x += speed;
         grid.SetTile(x, y, ascii);
@@ -108,14 +116,18 @@ public:
 
     int GetX() const { return x; }
     int GetY() const { return y; }
-    bool IsAlive() const { return alive; }
+    bool IsAlive() const { return state == InvaderState::Alive; }
+    bool IsDead() const { return state == InvaderState::Dead; }
+    void SetInactive() { state = InvaderState::Inactive; }
 
     static constexpr char ascii = '*';
 
 private:
     int x{};
     int y{};
-    bool alive{};
+    InvaderState state{};
+    Bullet bullet{};
+    static constexpr int BULLET_THRESHOLD = 214748365;
 };
 
 class Fleet
@@ -133,33 +145,45 @@ public:
 
     void Update(Grid& grid)
     {
-        int indexToDelete = -1;
         for (int i = 0; i < invaders.size(); i++)
         {
             invaders[i].Collide(grid);
-            if (!invaders[i].IsAlive())
+            if (invaders[i].IsDead())
             {
-                indexToDelete = i;
+                if (actionThreshold > 5)
+                    actionThreshold--;
+                invaders[i].SetInactive();
+                deadInvaders++;
                 break;
             }
-        }
-        if (indexToDelete >= 0)
-            invaders.erase(invaders.begin()+indexToDelete);            
+        }    
 
         actionPoints += 1;
         if (actionPoints < actionThreshold) return;
         actionPoints = 0;
 
-        for (auto& invader : invaders)
-            invader.Update(speed, grid);
+        int rightInvader = -1;
+        int leftInvader = -1;
+        for (int i = 0; i < invaders.size(); i++)
+        {
+            if (leftInvader < 0 && invaders[i].IsAlive())
+            {
+                leftInvader = i;
+                rightInvader = i;
+            }
+            if (i > rightInvader && invaders[i].IsAlive())
+                rightInvader = i;
+            invaders[i].Update(speed, grid);
+        }
 
-        if (speed == 1 && invaders.back().GetX() == xMax)
+        if (speed == 1 && invaders[rightInvader].GetX() == xMax)
             speed = -1;
-        else if (speed == -1 && invaders.front().GetX() == 0)
+        else if (speed == -1 && invaders[leftInvader].GetX() == 0)
             speed = 1;
     }
 
     const vector<Invader> GetInvaders() const { return invaders; }
+    bool IsDestroyed() const { return invaders.size() == deadInvaders; }
 
 private:
     int xMax{};
@@ -167,7 +191,9 @@ private:
     int speed = 1;
     int actionPoints{};
     int actionThreshold{20};
+    int deadInvaders{};
     vector<Invader> invaders{};
+    vector<Bullet> bullets{};
 };
 
 class Player 
@@ -177,10 +203,23 @@ public:
     {
         x = xMax/2;
         y = yMax*0.9;
+        alive = true;
+    }
+
+    void Collide(Grid& grid)
+    {
+        if (grid.IsCollision(x, y, Bullet::ascii))
+        {
+            alive = false;
+            grid.SetTile(x, y); 
+            return;
+        }
     }
 
     void Update(UserInput userInput, Grid& grid)
     {
+        Collide(grid);
+        if (!alive) return;
         grid.SetTile(x, y);
         if (userInput == UserInput::Left)
             x += -1;
@@ -195,6 +234,7 @@ public:
 
     int GetX() const { return x; }
     int GetY() const { return y; }
+    bool IsAlive() const { return alive; }
 
     static constexpr char ascii = '@';
 
@@ -204,8 +244,11 @@ private:
     int xMax{};
     int yMax{};
     int speed{};
+    bool alive{};
     Bullet bullet;
 };
+
+enum class GameState { Running, Victory, Defeat };
 
 class Game
 {
@@ -219,16 +262,20 @@ public:
     void Update(UserInput userInput)
     {
         player.Update(userInput, grid);
+        if (!player.IsAlive()) state = GameState::Defeat;
         fleet.Update(grid);
+        if (fleet.IsDestroyed()) state = GameState::Victory;
     }
 
-    const Grid GetGrid() { return grid; }
+    const Grid& GetGrid() { return grid; }
+    const bool IsRunning() { return state == GameState::Running; }
+    const bool IsVictory() { return state == GameState::Victory; }
 
 private:
     Grid grid;
     Player player;
     Fleet fleet;
-    
+    GameState state{};
 };
 
 int main()
@@ -238,6 +285,7 @@ int main()
     Input input{};
     Render render{console};
     Game game{console.width, console.height};
+    srand(time(nullptr));
 
     while(1)
     {
@@ -245,13 +293,28 @@ int main()
 
         UserInput userInput = input.Read();
 
-        if (userInput == UserInput::Quit) break;
+        if (userInput == UserInput::Quit) return 0;
 
         game.Update(userInput);
-
+            
         render.Draw(game.GetGrid().GetTiles() );
+
+        if (!game.IsRunning())
+        {
+            console.moveCursor(console.height/2, console.width/4);
+            if (game.IsVictory())
+                console.print("You defeated the evil invaders! Hip-hip-hooray!");
+            else
+                console.print("The evil invaders have won. Goodbye world!");
+            break;
+        }
     }
 
+    frame = {1};
+    frame.limit();
+    frame.limit();
+    frame.limit();
+    frame.limit();
     frame.limit();
 
     return 0;
